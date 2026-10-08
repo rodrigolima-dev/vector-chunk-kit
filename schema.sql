@@ -1,9 +1,15 @@
 -- Apply only to a database you own. This file is never executed by the CLI.
 CREATE EXTENSION IF NOT EXISTS vector;
 
+CREATE TABLE IF NOT EXISTS chunkkit_namespace_models (
+    namespace text PRIMARY KEY,
+    embedding_model text NOT NULL,
+    dimensions integer CHECK (dimensions BETWEEN 1 AND 4096)
+);
+
 CREATE TABLE IF NOT EXISTS chunkkit_chunks (
     chunk_id text PRIMARY KEY,
-    namespace text NOT NULL,
+    namespace text NOT NULL REFERENCES chunkkit_namespace_models(namespace),
     source_id text NOT NULL,
     chunk_index integer NOT NULL CHECK (chunk_index >= 0),
     content_hash text NOT NULL,

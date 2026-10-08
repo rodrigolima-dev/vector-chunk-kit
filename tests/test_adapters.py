@@ -64,3 +64,101 @@ def test_pgvector_read_keeps_namespace_in_parameterized_query(monkeypatch) -> No
     assert "WHERE namespace = %s" in statement
     assert "demo" not in statement
     assert params == ("demo", ["existing-id"])
+
+
+def test_pgvector_model_guard_rejects_a_different_model(monkeypatch) -> None:
+    class ModelConnection(FakeConnection):
+        model: str | None = None
+        row: tuple[str] | None = None
+
+        def execute(self, statement: str, params: object) -> "ModelConnection":
+            super().execute(statement, params)
+            if statement.startswith("INSERT INTO chunkkit_namespace_models"):
+                assert isinstance(params, tuple)
+                requested_model = params[1]
+                assert isinstance(requested_model, str)
+                self.row = (requested_model,) if self.model is None else None
+                self.model = self.model or requested_model
+            elif statement.startswith("SELECT embedding_model FROM chunkkit_namespace_models"):
+                self.row = (self.model,) if self.model is not None else None
+            return self
+
+        def fetchone(self) -> tuple[str] | None:
+            return self.row
+
+    connection = ModelConnection()
+    monkeypatch.setattr(psycopg, "connect", lambda *args, **kwargs: connection)
+    monkeypatch.setattr(pgvector.psycopg, "register_vector", lambda conn: None)
+
+    with PgvectorStore("dbname=synthetic") as store:
+        store.ensure_model("demo", "first-model")
+        store.ensure_model("demo", "first-model")
+        with pytest.raises(ValueError, match="different embedding model"):
+            store.ensure_model("demo", "second-model")
+
+    assert connection.model == "first-model"
+    assert all("demo" not in statement for statement, _ in connection.queries)
+    assert connection.closed
+
+
+def test_pgvector_refuses_legacy_chunks_without_a_model_record(monkeypatch) -> None:
+    class LegacyConnection(FakeConnection):
+        row: tuple[str] | None = None
+
+        def execute(self, statement: str, params: object) -> "LegacyConnection":
+            super().execute(statement, params)
+            if statement.startswith("INSERT INTO chunkkit_namespace_models"):
+                assert isinstance(params, tuple)
+                self.row = None if "NOT EXISTS" in statement else (params[1],)
+            elif statement.startswith("SELECT embedding_model FROM chunkkit_namespace_models"):
+                self.row = None
+            return self
+
+        def fetchone(self) -> tuple[str] | None:
+            return self.row
+
+    connection = LegacyConnection()
+    monkeypatch.setattr(psycopg, "connect", lambda *args, **kwargs: connection)
+    monkeypatch.setattr(pgvector.psycopg, "register_vector", lambda conn: None)
+
+    with PgvectorStore("dbname=synthetic") as store:
+        with pytest.raises(ValueError, match="legacy namespace"):
+            store.ensure_model("demo", "new-model")
+
+    assert connection.closed
+
+
+def test_pgvector_dimension_guard_rejects_a_different_size(monkeypatch) -> None:
+    class DimensionConnection(FakeConnection):
+        dimensions: int | None = None
+        row: tuple[int] | None = None
+
+        def execute(self, statement: str, params: object) -> "DimensionConnection":
+            super().execute(statement, params)
+            if statement.startswith("UPDATE chunkkit_namespace_models"):
+                assert isinstance(params, tuple)
+                requested = params[0]
+                assert isinstance(requested, int)
+                if self.dimensions is None or self.dimensions == requested:
+                    self.dimensions = requested
+                    self.row = (requested,)
+                else:
+                    self.row = None
+            return self
+
+        def fetchone(self) -> tuple[int] | None:
+            return self.row
+
+    connection = DimensionConnection()
+    monkeypatch.setattr(psycopg, "connect", lambda *args, **kwargs: connection)
+    monkeypatch.setattr(pgvector.psycopg, "register_vector", lambda conn: None)
+
+    with PgvectorStore("dbname=synthetic") as store:
+        store.ensure_dimensions("demo", 2)
+        store.ensure_dimensions("demo", 2)
+        with pytest.raises(ValueError, match="different vector dimension"):
+            store.ensure_dimensions("demo", 3)
+
+    assert connection.dimensions == 2
+    assert all("demo" not in statement for statement, _ in connection.queries)
+    assert connection.closed

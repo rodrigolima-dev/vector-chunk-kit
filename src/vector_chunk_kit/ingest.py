@@ -12,6 +12,10 @@ class Embedder(Protocol):
 
 
 class Store(Protocol):
+    def ensure_model(self, namespace: str, model: str) -> None: ...
+
+    def ensure_dimensions(self, namespace: str, dimensions: int) -> None: ...
+
     def existing_hashes(self, namespace: str, ids: list[str]) -> dict[str, str]: ...
 
     def upsert(self, items: list[Chunk], vectors: list[list[float]]) -> None: ...
@@ -25,10 +29,17 @@ class IngestResult:
 
 
 def ingest_chunks(
-    chunks: list[Chunk], namespace: str, embedder: Embedder, store: Store, batch_size: int
+    chunks: list[Chunk],
+    namespace: str,
+    embedder: Embedder,
+    store: Store,
+    batch_size: int,
+    model: str = "text-embedding-3-small",
 ) -> IngestResult:
     if not 1 <= batch_size <= 128:
         raise ValueError("batch_size must be between 1 and 128")
+    if not model.strip():
+        raise ValueError("embedding model is required")
     ids: set[str] = set()
     for chunk in chunks:
         if chunk.namespace != namespace:
@@ -38,6 +49,8 @@ def ingest_chunks(
         if chunk.chunk_id in ids:
             raise ValueError("duplicate chunk id")
         ids.add(chunk.chunk_id)
+
+    store.ensure_model(namespace, model)
 
     skipped = 0
     written = 0
@@ -60,6 +73,7 @@ def ingest_chunks(
             for vector in vectors
         ):
             raise ValueError("embedding provider returned an invalid vector")
+        store.ensure_dimensions(namespace, dimensions)
         store.upsert(pending, vectors)
         written += len(pending)
     return IngestResult(total=len(chunks), skipped=skipped, written=written)

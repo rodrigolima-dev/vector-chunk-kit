@@ -16,7 +16,7 @@ prepare ──> reviewable JSONL chunks ──> ingest preview (offline)
                                   embeddings API + pgvector
 ```
 
-`prepare` splits text on word boundaries, optionally overlaps adjacent chunks, and renders each part through a template with `{title}`, `{keywords}`, and `{body}`. A content hash tracks changes; a stable chunk ID identifies the namespace, source, and position. On repeat ingestion, unchanged hashes skip the embedding call. Each database batch commits atomically, so an interrupted run can be repeated.
+`prepare` splits text on word boundaries, optionally overlaps adjacent chunks, and renders each part through a template with `{title}`, `{keywords}`, and `{body}`. A content hash tracks changes; a stable chunk ID identifies the namespace, source, and position. On repeat ingestion of the same input, unchanged hashes skip the embedding call. Each database batch commits atomically, so an interrupted run can be repeated.
 
 ## Try it locally
 
@@ -32,7 +32,7 @@ uv run vector-chunk-kit prepare \
 uv run vector-chunk-kit ingest --input output/chunks.jsonl --namespace demo
 ```
 
-The preview reports counts and a rough character-based token estimate. It does not need an API key or database. Inspect `output/chunks.jsonl` before any write. Output files, local environments, and credentials are ignored by Git.
+With the included fictional documents, `prepare` reports 2 chunks and the offline preview reports an estimate of 97 tokens. The estimate is based on character count, not model tokenization. Neither command needs an API key or database. Inspect `output/chunks.jsonl` before any write. `prepare` refuses to overwrite an existing output file; choose a new output path for another run. Output files, local environments, and credentials are ignored by Git.
 
 ### Input format
 
@@ -50,7 +50,7 @@ Make a text template containing `{body}` and optionally `{title}` and `{keywords
 
 ## Write to your own pgvector database
 
-Use a disposable PostgreSQL database with the pgvector extension. Review and apply [schema.sql](schema.sql) yourself; the CLI never creates or migrates tables. Supply `OPENAI_API_KEY` and `DATABASE_URL` through your environment or a local secret manager. [.env.example](.env.example) contains placeholders only. The CLI does not load `.env` files automatically.
+Use a disposable PostgreSQL database with the pgvector extension. Review and apply [schema.sql](schema.sql) to a fresh database yourself; the CLI never creates or migrates tables. `CREATE TABLE IF NOT EXISTS` does not upgrade an older table. A namespace containing chunks without a model record is rejected; regenerate its embeddings in a new namespace or review a migration yourself. Stop older ingesters before migrating. Supply `OPENAI_API_KEY` and `DATABASE_URL` through your environment or a local secret manager. [.env.example](.env.example) contains placeholders only. The CLI does not load `.env` files automatically.
 
 ```bash
 uv run vector-chunk-kit ingest \
@@ -61,7 +61,7 @@ uv run vector-chunk-kit ingest \
   --confirm-namespace demo
 ```
 
-The selected namespace must be repeated exactly with `--confirm-namespace`. The optional `--model` defaults to `text-embedding-3-small`. The [OpenAI embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create) processes the chunk text, so send only data you are allowed to share with that provider. Costs depend on the model and input; the preview is **not** a price quote. The database adapter uses [pgvector's Psycopg integration](https://github.com/pgvector/pgvector-python#psycopg-3).
+The selected namespace must be repeated exactly with `--confirm-namespace`. The optional `--model` defaults to `text-embedding-3-small`. The first applied run binds its namespace to one embedding model and vector dimension in the database. A later run with a different model fails before requesting embeddings; a different dimension fails before writing that batch. Use a new namespace and a separate retrieval configuration when changing models. The [OpenAI embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create) processes the chunk text, so send only data you are allowed to share with that provider. Costs depend on the model and input; the preview is **not** a price quote. The database adapter uses [pgvector's Psycopg integration](https://github.com/pgvector/pgvector-python#psycopg-3).
 
 ## Verify
 
@@ -72,12 +72,13 @@ uv run mypy src
 uv build
 ```
 
-The tests cover deterministic output, custom context, malformed input, cross-namespace rejection, idempotent skips, batch failure, invalid vectors, and a preview that works without credentials. CI runs these checks on Linux and Windows. A live database integration test requires a developer-owned disposable PostgreSQL service and is not part of the default suite.
+The tests cover deterministic output, custom context, malformed input, cross-namespace rejection, model and dimension guards, idempotent skips, batch failure, invalid vectors, and a preview that works without credentials. CI runs these checks on Linux and Windows. A live database integration test requires a developer-owned disposable PostgreSQL service and is not part of the default suite.
 
 ## Boundaries
 
 - The CLI scopes records and queries by namespace to prevent accidental mixing. It is **not** a full multi-tenant authorization service. Shared deployments need database roles, row-level security, and their own identity checks.
 - Replacing a source with fewer chunks updates the surviving positions but does not delete old positions. Review or remove stale positions in your own data lifecycle before using this for retrieval.
+- Concurrent ingestions of different revisions of one source use last-writer-wins updates. Serialize writers for a source if update order matters. Direct database writes can bypass the CLI's model and dimension checks.
 - One `--apply` run may make billable embedding requests. Partial database failure can require retrying a batch; already committed chunks are skipped on a later run.
 - This repository contains only synthetic examples. Do not commit prepared output containing private text or credentials.
 

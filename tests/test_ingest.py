@@ -28,6 +28,18 @@ class FakeStore:
         self.unchanged = unchanged or {}
         self.reads: list[tuple[str, list[str]]] = []
         self.writes: list[list[Chunk]] = []
+        self.models: dict[str, str] = {}
+        self.dimensions: dict[str, int] = {}
+
+    def ensure_model(self, namespace: str, model: str) -> None:
+        existing = self.models.setdefault(namespace, model)
+        if existing != model:
+            raise ValueError("namespace uses a different embedding model")
+
+    def ensure_dimensions(self, namespace: str, dimensions: int) -> None:
+        existing = self.dimensions.setdefault(namespace, dimensions)
+        if existing != dimensions:
+            raise ValueError("namespace uses a different vector dimension")
 
     def existing_hashes(self, namespace: str, ids: list[str]) -> dict[str, str]:
         self.reads.append((namespace, ids))
@@ -85,3 +97,34 @@ def test_ingest_rejects_invalid_vector_shape() -> None:
     with pytest.raises(ValueError, match="vector"):
         ingest_chunks(chunks(), "demo", BadEmbedder(), store, batch_size=2)
     assert store.writes == []
+
+
+def test_model_change_in_existing_namespace_fails_before_embedding() -> None:
+    items = chunks()
+    store = FakeStore({items[0].chunk_id: items[0].content_hash})
+    store.models["demo"] = "first-model"
+    embedder = FakeEmbedder()
+
+    with pytest.raises(ValueError, match="different embedding model"):
+        ingest_chunks(items, "demo", embedder, store, batch_size=2, model="second-model")
+
+    assert store.reads == []
+    assert store.writes == []
+    assert embedder.calls == []
+
+
+def test_dimension_change_between_batches_fails_before_second_write() -> None:
+    class ChangingEmbedder(FakeEmbedder):
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(texts)
+            dimensions = 2 if len(self.calls) == 1 else 3
+            return [[1.0] * dimensions for _ in texts]
+
+    store = FakeStore()
+    embedder = ChangingEmbedder()
+
+    with pytest.raises(ValueError, match="different vector dimension"):
+        ingest_chunks(chunks(), "demo", embedder, store, batch_size=1)
+
+    assert len(store.writes) == 1
+    assert store.dimensions["demo"] == 2
