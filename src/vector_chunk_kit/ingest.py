@@ -14,6 +14,8 @@ class Embedder(Protocol):
 class Store(Protocol):
     def ensure_model(self, namespace: str, model: str) -> None: ...
 
+    def ensure_dimensions(self, namespace: str, dimensions: int) -> None: ...
+
     def existing_hashes(self, namespace: str, ids: list[str]) -> dict[str, str]: ...
 
     def upsert(self, items: list[Chunk], vectors: list[list[float]]) -> None: ...
@@ -71,6 +73,7 @@ def ingest_chunks(
             for vector in vectors
         ):
             raise ValueError("embedding provider returned an invalid vector")
+        store.ensure_dimensions(namespace, dimensions)
         store.upsert(pending, vectors)
         written += len(pending)
     return IngestResult(total=len(chunks), skipped=skipped, written=written)

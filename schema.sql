@@ -3,7 +3,8 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS chunkkit_namespace_models (
     namespace text PRIMARY KEY,
-    embedding_model text NOT NULL
+    embedding_model text NOT NULL,
+    dimensions integer CHECK (dimensions BETWEEN 1 AND 4096)
 );
 
 CREATE TABLE IF NOT EXISTS chunkkit_chunks (

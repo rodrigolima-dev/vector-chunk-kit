@@ -53,9 +53,11 @@ class PgvectorStore:
         with self._connection.transaction():
             row = self._connection.execute(
                 "INSERT INTO chunkkit_namespace_models (namespace, embedding_model) "
-                "VALUES (%s, %s) ON CONFLICT (namespace) DO NOTHING "
+                "SELECT %s, %s WHERE NOT EXISTS "
+                "(SELECT 1 FROM chunkkit_chunks WHERE namespace = %s) "
+                "ON CONFLICT (namespace) DO NOTHING "
                 "RETURNING embedding_model",
-                (namespace, model),
+                (namespace, model, namespace),
             ).fetchone()
             if row is None:
                 row = self._connection.execute(
@@ -63,9 +65,23 @@ class PgvectorStore:
                     (namespace,),
                 ).fetchone()
             if row is None:
-                raise ValueError("namespace model registration failed")
+                raise ValueError("legacy namespace has chunks without a model record")
             if row[0] != model:
                 raise ValueError("namespace uses a different embedding model")
+
+    def ensure_dimensions(self, namespace: str, dimensions: int) -> None:
+        if not SAFE_ID.fullmatch(namespace):
+            raise ValueError("namespace must be a simple non-empty identifier")
+        if not 1 <= dimensions <= 4096:
+            raise ValueError("vector dimension must be between 1 and 4096")
+        row = self._connection.execute(
+            "UPDATE chunkkit_namespace_models SET dimensions = %s "
+            "WHERE namespace = %s AND (dimensions IS NULL OR dimensions = %s) "
+            "RETURNING dimensions",
+            (dimensions, namespace, dimensions),
+        ).fetchone()
+        if row is None:
+            raise ValueError("namespace uses a different vector dimension or lacks a model record")
 
     def existing_hashes(self, namespace: str, ids: list[str]) -> dict[str, str]:
         if not SAFE_ID.fullmatch(namespace):
