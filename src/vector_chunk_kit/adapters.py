@@ -45,6 +45,28 @@ class PgvectorStore:
     def __exit__(self, *_: object) -> None:
         self._connection.close()
 
+    def ensure_model(self, namespace: str, model: str) -> None:
+        if not SAFE_ID.fullmatch(namespace):
+            raise ValueError("namespace must be a simple non-empty identifier")
+        if not model.strip() or len(model) > 128:
+            raise ValueError("embedding model must be a non-empty identifier")
+        with self._connection.transaction():
+            row = self._connection.execute(
+                "INSERT INTO chunkkit_namespace_models (namespace, embedding_model) "
+                "VALUES (%s, %s) ON CONFLICT (namespace) DO NOTHING "
+                "RETURNING embedding_model",
+                (namespace, model),
+            ).fetchone()
+            if row is None:
+                row = self._connection.execute(
+                    "SELECT embedding_model FROM chunkkit_namespace_models WHERE namespace = %s",
+                    (namespace,),
+                ).fetchone()
+            if row is None:
+                raise ValueError("namespace model registration failed")
+            if row[0] != model:
+                raise ValueError("namespace uses a different embedding model")
+
     def existing_hashes(self, namespace: str, ids: list[str]) -> dict[str, str]:
         if not SAFE_ID.fullmatch(namespace):
             raise ValueError("namespace must be a simple non-empty identifier")

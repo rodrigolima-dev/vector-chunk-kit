@@ -72,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
 
             embedder = OpenAIEmbedder(api_key=api_key, model=args.model)
             with PgvectorStore(database_url) as store:
-                result = ingest_chunks(chunks, args.namespace, embedder, store, args.batch_size)
+                result = ingest_chunks(
+                    chunks, args.namespace, embedder, store, args.batch_size, model=args.model
+                )
         except Exception:
             print(
                 "Ingestion failed. Provider and database details are suppressed; "
