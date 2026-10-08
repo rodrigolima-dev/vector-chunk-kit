@@ -84,3 +84,18 @@ def test_invalid_chunk_content_hash_cannot_reach_ingestion(tmp_path: Path, capsy
 
     assert main(["ingest", "--input", str(prepared), "--namespace", "demo"]) == 2
     assert "hash" in capsys.readouterr().err
+
+
+def test_duplicate_prepared_chunks_fail_in_offline_preview(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "source.jsonl"
+    prepared = tmp_path / "chunks.jsonl"
+    write_documents(source)
+    assert (
+        main(["prepare", "--input", str(source), "--output", str(prepared), "--namespace", "demo"])
+        == 0
+    )
+    one_line = prepared.read_text(encoding="utf-8")
+    prepared.write_text(one_line + one_line, encoding="utf-8")
+
+    assert main(["ingest", "--input", str(prepared), "--namespace", "demo"]) == 2
+    assert "duplicate" in capsys.readouterr().err

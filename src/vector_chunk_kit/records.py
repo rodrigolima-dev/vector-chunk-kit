@@ -14,6 +14,7 @@ def read_documents(path: Path) -> list[dict[str, object]]:
 
 def read_chunks(path: Path) -> list[Chunk]:
     chunks: list[Chunk] = []
+    seen_ids: set[str] = set()
     expected = set(Chunk.__dataclass_fields__)
     for record in _read_jsonl(path):
         item = _object(record)
@@ -37,6 +38,9 @@ def read_chunks(path: Path) -> list[Chunk]:
             raise ValueError("prepared chunk contains invalid fields")
         if chunk_id != make_chunk_id(namespace, source_id, index):
             raise ValueError("prepared chunk id does not match its source")
+        if chunk_id in seen_ids:
+            raise ValueError("duplicate prepared chunk id")
+        seen_ids.add(chunk_id)
         if content_hash != make_content_hash(text, metadata):
             raise ValueError("prepared chunk content hash does not match text")
         chunks.append(
