@@ -1,0 +1,20 @@
+name: Bug report
+description: Report a reproducible problem without sharing private data
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Use synthetic input. Remove credentials, URLs, and private text.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Python and package versions
