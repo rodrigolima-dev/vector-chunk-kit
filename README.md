@@ -72,7 +72,7 @@ uv run mypy src
 uv build
 ```
 
-The tests cover deterministic output, custom context, malformed input, cross-namespace rejection, model and dimension guards, idempotent skips, batch failure, invalid vectors, and a preview that works without credentials. CI runs these checks on Linux and Windows, plus a separate integration job against a disposable PostgreSQL 16 service with pgvector. That job applies `schema.sql` in an isolated schema, checks a real insert and update, and rejects model and dimension changes. The local suite skips this test unless `CHUNKKIT_TEST_DATABASE_URL` points to a PostgreSQL instance on localhost named `chunkkit_test`. Never set that variable to an operational database.
+The tests cover deterministic output, custom context, malformed input, cross-namespace rejection, model and dimension guards, idempotent skips, batch failure, invalid vectors, and a preview that works without credentials. CI runs these checks on Linux and Windows, plus a separate integration job against a disposable PostgreSQL 16 service with pgvector. That job installs the extension and applies `schema.sql` inside a temporary schema, checks a real insert and update, and rejects model and dimension changes. The local suite skips this test unless `CHUNKKIT_TEST_DATABASE_URL` names the disposable `chunkkit_test` database for user `chunkkit` at `127.0.0.1:5432`. The test rejects connection-routing overrides and pins the network address to loopback. Never point the test at an operational database or forward its local port to one.
 
 ## Boundaries
 

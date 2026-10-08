@@ -24,23 +24,68 @@ class FakeEmbedder:
         return [[1.0] * self.dimensions for _ in texts]
 
 
+def local_test_dsn(database_url: str) -> str:
+    """Discard libpq overrides and pin every routing field to the CI-only database."""
+    connection_info = conninfo_to_dict(database_url)
+    allowed = {"host", "port", "dbname", "user", "password"}
+    if (
+        set(connection_info) - allowed
+        or connection_info.get("host") != "127.0.0.1"
+        or connection_info.get("port") != "5432"
+        or connection_info.get("dbname") != "chunkkit_test"
+        or connection_info.get("user") != "chunkkit"
+        or not connection_info.get("password")
+    ):
+        raise ValueError("integration test requires the disposable local database")
+    return make_conninfo(
+        "",
+        host="127.0.0.1",
+        hostaddr="127.0.0.1",
+        port="5432",
+        dbname="chunkkit_test",
+        user="chunkkit",
+        password=connection_info["password"],
+    )
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://chunkkit:synthetic@127.0.0.1:5432/chunkkit_test?hostaddr=203.0.113.7",
+        "postgresql://chunkkit:synthetic@127.0.0.1:5432/chunkkit_test?service=remote",
+        "postgresql://chunkkit:synthetic@127.0.0.1:5433/chunkkit_test",
+    ],
+)
+def test_connection_guard_rejects_remote_override(database_url: str) -> None:
+    with pytest.raises(ValueError, match="disposable local database"):
+        local_test_dsn(database_url)
+
+
+def test_connection_guard_forces_loopback_even_with_pg_environment(monkeypatch) -> None:
+    monkeypatch.setenv("PGHOSTADDR", "203.0.113.7")
+    database_url = "postgresql://chunkkit:synthetic@127.0.0.1:5432/chunkkit_test"
+    resolved = conninfo_to_dict(local_test_dsn(database_url))
+    assert resolved["hostaddr"] == "127.0.0.1"
+    assert resolved["host"] == "127.0.0.1"
+
+
 def test_pgvector_round_trip_and_guards() -> None:
     database_url = os.environ.get("CHUNKKIT_TEST_DATABASE_URL")
     if not database_url:
         pytest.skip("disposable local PostgreSQL is not configured")
-    connection_info = conninfo_to_dict(database_url)
-    if connection_info.get("host") not in {"localhost", "127.0.0.1", "::1"}:
-        pytest.fail("integration test refuses a non-local database")
-    if connection_info.get("dbname") != "chunkkit_test":
-        pytest.fail("integration test requires the disposable chunkkit_test database")
+    safe_url = local_test_dsn(database_url)
 
     schema_name = f"chunkkit_test_{uuid4().hex}"
-    with psycopg.connect(database_url, autocommit=True) as admin:
-        admin.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    with psycopg.connect(safe_url, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name)))
         try:
+            admin.execute(
+                sql.SQL("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA {}").format(
+                    sql.Identifier(schema_name)
+                )
+            )
             scoped_url = make_conninfo(
-                database_url, options=f"-csearch_path={schema_name},public"
+                safe_url, options=f"-csearch_path={schema_name},public"
             )
             with psycopg.connect(scoped_url, autocommit=True) as setup:
                 schema_sql = Path("schema.sql").read_text(encoding="utf-8")
