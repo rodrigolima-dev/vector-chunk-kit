@@ -32,7 +32,7 @@ uv run vector-chunk-kit prepare \
 uv run vector-chunk-kit ingest --input output/chunks.jsonl --namespace demo
 ```
 
-The preview reports counts and a rough character-based token estimate. It does not need an API key or database. Inspect `output/chunks.jsonl` before any write. Output files, local environments, and credentials are ignored by Git.
+With the included fictional documents, `prepare` reports 2 chunks and the offline preview reports an estimate of 97 tokens. The estimate is based on character count, not model tokenization. Neither command needs an API key or database. Inspect `output/chunks.jsonl` before any write. `prepare` refuses to overwrite an existing output file; choose a new output path for another run. Output files, local environments, and credentials are ignored by Git.
 
 ### Input format
 
@@ -61,7 +61,7 @@ uv run vector-chunk-kit ingest \
   --confirm-namespace demo
 ```
 
-The selected namespace must be repeated exactly with `--confirm-namespace`. The optional `--model` defaults to `text-embedding-3-small`. The [OpenAI embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create) processes the chunk text, so send only data you are allowed to share with that provider. Costs depend on the model and input; the preview is **not** a price quote. The database adapter uses [pgvector's Psycopg integration](https://github.com/pgvector/pgvector-python#psycopg-3).
+The selected namespace must be repeated exactly with `--confirm-namespace`. The optional `--model` defaults to `text-embedding-3-small`. The first applied run binds its namespace to that embedding model in the database; a later run with a different model fails before requesting embeddings. Use a new namespace and a separate retrieval configuration when changing models. The [OpenAI embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create) processes the chunk text, so send only data you are allowed to share with that provider. Costs depend on the model and input; the preview is **not** a price quote. The database adapter uses [pgvector's Psycopg integration](https://github.com/pgvector/pgvector-python#psycopg-3).
 
 ## Verify
 
