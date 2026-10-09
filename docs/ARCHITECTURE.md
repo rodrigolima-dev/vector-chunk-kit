@@ -1,25 +1,35 @@
-# Architecture and security
+# Architecture and security boundaries
 
-## Components
+```text
+JSONL documents -> validate -> prepare -> reviewable JSONL -> offline preview
+                                               |
+                                               +-> explicit apply -> embeddings API -> PostgreSQL/pgvector
+```
 
-`prepare.py` validates developer-owned documents and creates deterministic chunks. `records.py` handles the JSONL boundary and verifies chunk IDs and content hashes when reading them back. `ingest.py` coordinates batched embedding and upsert through small provider/store interfaces. `adapters.py` supplies the optional OpenAI and pgvector implementations. `cli.py` keeps preview offline and gates writes behind explicit flags.
+## Design decisions
+
+| Decision | Reason | Tradeoff |
+| --- | --- | --- |
+| Keep `prepare` and preview offline | A developer can inspect every rendered chunk before a provider sees it | Source text exists in a local output file and must be protected |
+| Build deterministic IDs from namespace, source, and position | Repeated imports target the same database row | A shorter source leaves surplus positions unless explicitly replaced |
+| Hash rendered text and metadata | Detect changed records and skip unchanged embeddings | Metadata-only edits still request a new embedding |
+| Bind one model and dimension to each namespace | Avoid mixing incompatible vector spaces through this CLI | Model changes need a new namespace and matching retrieval configuration |
+| Offer incremental and explicit source replacement modes | Routine updates can be batched; a single source can be made complete | Replacement holds a transaction for one source and requires a one-source file |
+
+`records.py` validates JSONL and recomputes IDs and hashes when prepared chunks are read. `prepare.py` splits text and applies a constrained template. `ingest.py` coordinates the provider and store through small interfaces; `adapters.py` implements OpenAI and PostgreSQL. `cli.py` requires `--apply` and exact namespace confirmation before writing.
 
 ## Trust boundaries
 
-1. **Input file:** Untrusted JSONL is parsed and validated. Every record must match the requested namespace. The tool never reads from an existing operational database to construct chunks.
-2. **Prepared file:** This file can contain the full source text. Keep it private and inspect it before applying. IDs and hashes are recomputed on read so edited content cannot silently retain a previous hash.
-3. **Embedding provider:** Only `ingest --apply` sends text outside the machine. The provider key comes from the environment and is never written to the prepared file. Provider/database exception details are suppressed in the CLI to avoid leaking secrets or source text into logs.
-4. **Database:** The fixed tables and parameterized SQL avoid developer-controlled table names. The first applied run registers one embedding model per namespace in a transaction only if that namespace has no legacy chunks. Each batch checks its vector dimension against the namespace record before writing. Reads include a namespace predicate. Writes contain the namespace in the unique key and run inside a transaction per batch. The CLI never executes schema changes.
+1. **Input:** Every record must match the requested namespace. Malformed input fails before an output file is opened. The tool never extracts text from an operational database.
+2. **Prepared file:** It contains source text. Recomputed IDs and hashes catch accidental mismatch between a record and its generated fields. The hash is not a signature or tamper protection. Keep the file private and review it before apply.
+3. **Provider:** Only `ingest --apply` sends rendered text to the embeddings API. The API key comes from the environment. Provider and database exception details are suppressed at the CLI boundary to avoid printing sensitive payloads or credentials.
+4. **Database:** Queries use fixed tables, parameterized values, and namespace predicates. The first applied run registers a model for the namespace only when there are no legacy chunks lacking that record. Dimensions are checked before writes. The CLI does not apply `schema.sql` or migrate an existing database.
 
-## Failure behavior
+## Write and failure model
 
-- Invalid or mixed-namespace documents fail before the output is opened.
-- Invalid prepared hashes or IDs fail before external connections are made.
-- A failed embedding call produces no write for that batch. A failed database statement rolls back its batch.
-- A failed first run can leave an empty namespace model registration. Reuse that model or choose a new namespace; do not silently change a namespace's vector space.
-- An older database with chunks but no model record fails closed. The schema file does not migrate existing tables; migrations need separate review with old writers stopped.
-- Earlier committed batches remain after a later batch fails. Re-running skips chunks whose stored content hash matches. API calls for an uncommitted failed batch may be billed again.
+- Incremental mode embeds and commits in batches. A failed provider call writes nothing for that batch; a failed SQL statement rolls back that batch. Earlier batches remain and a retry skips rows with matching hashes.
+- `--replace-source` requires a file for one source with positions `0..n-1`. It gathers pending embeddings before changing chunks, then upserts and deletes surplus positions in one transaction for that source. Provider failure leaves stored chunks unchanged; SQL failure rolls the source transaction back.
+- A failed first apply may leave an empty namespace model registration. Reuse the same model or choose a new namespace. An older database containing chunks without a model record fails closed; applying `schema.sql` with `IF NOT EXISTS` does not upgrade it.
+- Provider requests may be billed even if the following database transaction fails. Two concurrent writers of the same source can still overwrite each other; serialize writers when update order matters.
 
-## What this does not claim
-
-Namespace labels alone do not authenticate a caller or enforce tenant isolation in a shared service. Deployments with mutually untrusted users need identity, role checks, PostgreSQL row-level security, and per-tenant operational controls. This project does not supply those policies. Concurrent writers for the same source use last-writer-wins semantics. Direct database writes can bypass CLI checks. The project also does not delete stale chunks when a document becomes shorter, estimate exact token billing, or verify a remote production configuration.
+Namespace labels and CLI checks do **not** authenticate users or enforce tenant separation in a shared service. A multi-user deployment needs identity checks, PostgreSQL roles, row-level security, and a policy for readers, writers, and migrations. Direct SQL writes bypass this CLI's model and dimension checks.
