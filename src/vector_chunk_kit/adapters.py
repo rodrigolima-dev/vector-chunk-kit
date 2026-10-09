@@ -20,7 +20,10 @@ class OpenAIEmbedder:
         response = self._client.embeddings.create(
             model=self._model, input=texts, encoding_format="float"
         )
-        return [list(item.embedding) for item in sorted(response.data, key=lambda item: item.index)]
+        ordered = sorted(response.data, key=lambda item: item.index)
+        if [item.index for item in ordered] != list(range(len(texts))):
+            raise ValueError("embedding provider returned invalid indexes")
+        return [list(item.embedding) for item in ordered]
 
 
 class PgvectorStore:
@@ -96,14 +99,74 @@ class PgvectorStore:
         return {row[0]: row[1] for row in rows}
 
     def upsert(self, items: list[Chunk], vectors: list[list[float]]) -> None:
-        from pgvector import Vector
-        from psycopg.types.json import Jsonb
-
         if len(items) != len(vectors) or not items:
             raise ValueError("chunks and vectors must have matching non-empty lengths")
         namespaces = {chunk.namespace for chunk in items}
         if len(namespaces) != 1 or not SAFE_ID.fullmatch(next(iter(namespaces))):
             raise ValueError("one valid namespace is required per batch")
+        with self._connection.transaction():
+            self._upsert_rows(items, vectors)
+
+    def replace_source(
+        self,
+        namespace: str,
+        source_id: str,
+        current: list[Chunk],
+        pending: list[Chunk],
+        vectors: list[list[float]],
+    ) -> None:
+        if not SAFE_ID.fullmatch(namespace) or not SAFE_ID.fullmatch(source_id):
+            raise ValueError("namespace and source must be simple non-empty identifiers")
+        if not current or any(
+            chunk.namespace != namespace or chunk.source_id != source_id for chunk in current
+        ):
+            raise ValueError("replacement must contain one source")
+        if sorted(chunk.chunk_index for chunk in current) != list(range(len(current))):
+            raise ValueError("replacement chunk indexes must be contiguous")
+        if len(pending) != len(vectors):
+            raise ValueError("chunks and vectors must have matching lengths")
+        expected = {chunk.chunk_id: chunk.content_hash for chunk in current}
+        if any(expected.get(chunk.chunk_id) != chunk.content_hash for chunk in pending):
+            raise ValueError("pending chunks must belong to the replacement")
+
+        with self._connection.transaction():
+            row = self._connection.execute(
+                "SELECT 1 FROM chunkkit_namespace_models WHERE namespace = %s FOR UPDATE",
+                (namespace,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("namespace lacks an embedding model record")
+            if vectors:
+                dimensions = len(vectors[0])
+                if any(len(vector) != dimensions for vector in vectors):
+                    raise ValueError("replacement vectors have different dimensions")
+                self.ensure_dimensions(namespace, dimensions)
+
+            rows = self._connection.execute(
+                "SELECT chunk_id, content_hash FROM chunkkit_chunks "
+                "WHERE namespace = %s AND source_id = %s AND chunk_id = ANY(%s)",
+                (namespace, source_id, list(expected)),
+            ).fetchall()
+            existing: dict[str, str] = dict(rows)
+            pending_ids = {chunk.chunk_id for chunk in pending}
+            if any(
+                existing.get(chunk_id) != content_hash
+                for chunk_id, content_hash in expected.items()
+                if chunk_id not in pending_ids
+            ):
+                raise ValueError("source changed during embedding; retry replacement")
+
+            self._upsert_rows(pending, vectors)
+            self._connection.execute(
+                "DELETE FROM chunkkit_chunks "
+                "WHERE namespace = %s AND source_id = %s AND NOT (chunk_id = ANY(%s))",
+                (namespace, source_id, list(expected)),
+            )
+
+    def _upsert_rows(self, items: list[Chunk], vectors: list[list[float]]) -> None:
+        from pgvector import Vector
+        from psycopg.types.json import Jsonb
+
         statement = (
             "INSERT INTO chunkkit_chunks "
             "(namespace, source_id, chunk_index, chunk_id, content_hash, "
@@ -114,18 +177,17 @@ class PgvectorStore:
             "content = EXCLUDED.content, metadata = EXCLUDED.metadata, "
             "embedding = EXCLUDED.embedding, updated_at = now()"
         )
-        with self._connection.transaction():
-            for chunk, vector in zip(items, vectors, strict=True):
-                self._connection.execute(
-                    statement,
-                    (
-                        chunk.namespace,
-                        chunk.source_id,
-                        chunk.chunk_index,
-                        chunk.chunk_id,
-                        chunk.content_hash,
-                        chunk.text,
-                        Jsonb(chunk.metadata),
-                        Vector(vector),
-                    ),
-                )
+        for chunk, vector in zip(items, vectors, strict=True):
+            self._connection.execute(
+                statement,
+                (
+                    chunk.namespace,
+                    chunk.source_id,
+                    chunk.chunk_index,
+                    chunk.chunk_id,
+                    chunk.content_hash,
+                    chunk.text,
+                    Jsonb(chunk.metadata),
+                    Vector(vector),
+                ),
+            )

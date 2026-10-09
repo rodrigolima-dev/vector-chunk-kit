@@ -1,7 +1,7 @@
 import pytest
 
 from vector_chunk_kit.ingest import ingest_chunks
-from vector_chunk_kit.prepare import Chunk, prepare_documents
+from vector_chunk_kit.prepare import Chunk, make_chunk_id, prepare_documents
 
 
 def chunks() -> list[Chunk]:
@@ -48,6 +48,21 @@ class FakeStore:
     def upsert(self, items: list[Chunk], vectors: list[list[float]]) -> None:
         assert len(items) == len(vectors)
         self.writes.append(items)
+
+    def replace_source(
+        self,
+        namespace: str,
+        source_id: str,
+        current: list[Chunk],
+        pending: list[Chunk],
+        vectors: list[list[float]],
+    ) -> None:
+        assert namespace == "demo"
+        assert source_id == "doc"
+        assert len(pending) == len(vectors)
+        if vectors:
+            self.ensure_dimensions(namespace, len(vectors[0]))
+        self.writes.append(pending)
 
 
 def test_ingest_is_scoped_batched_and_skips_unchanged_content() -> None:
@@ -128,3 +143,96 @@ def test_dimension_change_between_batches_fails_before_second_write() -> None:
 
     assert len(store.writes) == 1
     assert store.dimensions["demo"] == 2
+
+
+def test_replace_source_embeds_all_batches_before_one_store_write() -> None:
+    items = chunks()
+    store = FakeStore()
+    embedder = FakeEmbedder()
+
+    result = ingest_chunks(
+        items, "demo", embedder, store, batch_size=1, replace_source="doc"
+    )
+
+    assert result.written == len(items)
+    assert len(embedder.calls) == len(items)
+    assert store.writes == [items]
+
+
+def test_replace_source_rejects_other_sources_and_missing_indexes_before_store_calls() -> None:
+    items = chunks()
+    other_source = Chunk(
+        **{
+            **vars(items[0]),
+            "source_id": "other",
+            "chunk_id": make_chunk_id("demo", "other", items[0].chunk_index),
+        }
+    )
+    store = FakeStore()
+    embedder = FakeEmbedder()
+
+    with pytest.raises(ValueError, match="source"):
+        ingest_chunks(items + [other_source], "demo", embedder, store, 1, replace_source="doc")
+    with pytest.raises(ValueError, match="contiguous"):
+        ingest_chunks(items[1:], "demo", embedder, store, 1, replace_source="doc")
+
+    assert store.models == {}
+    assert store.reads == []
+    assert store.writes == []
+    assert embedder.calls == []
+
+
+def test_replace_source_embedding_failure_does_not_write() -> None:
+    class FailingSecondBatch(FakeEmbedder):
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(texts)
+            if len(self.calls) == 2:
+                raise RuntimeError("provider failed")
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+    store = FakeStore()
+    with pytest.raises(RuntimeError, match="provider failed"):
+        ingest_chunks(chunks(), "demo", FailingSecondBatch(), store, 1, replace_source="doc")
+    assert store.writes == []
+
+
+def test_replace_source_skips_unchanged_vectors_but_still_finalizes_source() -> None:
+    items = chunks()
+    store = FakeStore({item.chunk_id: item.content_hash for item in items})
+    embedder = FakeEmbedder()
+
+    result = ingest_chunks(items, "demo", embedder, store, 1, replace_source="doc")
+
+    assert result.skipped == len(items)
+    assert result.written == 0
+    assert embedder.calls == []
+    assert store.writes == [[]]
+
+
+def test_replace_source_keeps_model_and_dimension_guards() -> None:
+    items = chunks()
+    store = FakeStore()
+    store.models["demo"] = "first-model"
+    embedder = FakeEmbedder()
+
+    with pytest.raises(ValueError, match="different embedding model"):
+        ingest_chunks(items, "demo", embedder, store, 1, "second-model", "doc")
+    assert embedder.calls == []
+    assert store.writes == []
+
+    store.dimensions["demo"] = 2
+    with pytest.raises(ValueError, match="different vector dimension"):
+        ingest_chunks(items, "demo", embedder, store, 1, "first-model", "doc")
+    assert store.writes == []
+
+
+def test_replace_source_rejects_dimension_change_between_batches_before_write() -> None:
+    class ChangingEmbedder(FakeEmbedder):
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(texts)
+            return [[1.0] * (2 if len(self.calls) == 1 else 3) for _ in texts]
+
+    store = FakeStore()
+    with pytest.raises(ValueError, match="dimension between batches"):
+        ingest_chunks(chunks(), "demo", ChangingEmbedder(), store, 1, replace_source="doc")
+    assert store.writes == []

@@ -1,10 +1,12 @@
 from contextlib import nullcontext
+from types import SimpleNamespace
 
+import openai
 import pgvector.psycopg
 import psycopg
 import pytest
 
-from vector_chunk_kit.adapters import PgvectorStore
+from vector_chunk_kit.adapters import OpenAIEmbedder, PgvectorStore
 from vector_chunk_kit.prepare import prepare_documents
 
 
@@ -162,3 +164,52 @@ def test_pgvector_dimension_guard_rejects_a_different_size(monkeypatch) -> None:
     assert connection.dimensions == 2
     assert all("demo" not in statement for statement, _ in connection.queries)
     assert connection.closed
+
+
+def test_pgvector_replaces_one_source_in_one_transaction(monkeypatch) -> None:
+    class ReplacementConnection(FakeConnection):
+        def fetchone(self) -> tuple[int]:
+            return (1,)
+
+        def fetchall(self) -> list[tuple[str, str]]:
+            return []
+
+    connection = ReplacementConnection()
+    monkeypatch.setattr(psycopg, "connect", lambda *args, **kwargs: connection)
+    monkeypatch.setattr(pgvector.psycopg, "register_vector", lambda conn: None)
+    chunk = make_chunk("demo")
+
+    with PgvectorStore("dbname=synthetic") as store:
+        store.replace_source("demo", "source", [chunk], [chunk], [[1.0]])
+
+    assert connection.transactions == 1
+    deletions = [query for query, _ in connection.queries if query.startswith("DELETE")]
+    assert len(deletions) == 1
+    assert "namespace = %s AND source_id = %s" in deletions[0]
+
+
+def test_openai_embedder_restores_response_order(monkeypatch) -> None:
+    response = SimpleNamespace(
+        data=[
+            SimpleNamespace(index=1, embedding=[2.0]),
+            SimpleNamespace(index=0, embedding=[1.0]),
+        ]
+    )
+    client = SimpleNamespace(embeddings=SimpleNamespace(create=lambda **_: response))
+    monkeypatch.setattr(openai, "OpenAI", lambda **_: client)
+
+    assert OpenAIEmbedder("synthetic", "test-model").embed(["first", "second"]) == [
+        [1.0], [2.0]
+    ]
+
+
+@pytest.mark.parametrize("indexes", [[0, 0], [0, 2]])
+def test_openai_embedder_rejects_duplicate_or_missing_indexes(monkeypatch, indexes) -> None:
+    response = SimpleNamespace(
+        data=[SimpleNamespace(index=index, embedding=[1.0]) for index in indexes]
+    )
+    client = SimpleNamespace(embeddings=SimpleNamespace(create=lambda **_: response))
+    monkeypatch.setattr(openai, "OpenAI", lambda **_: client)
+
+    with pytest.raises(ValueError, match="indexes"):
+        OpenAIEmbedder("synthetic", "test-model").embed(["first", "second"])
