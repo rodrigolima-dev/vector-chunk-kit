@@ -133,6 +133,75 @@ def test_pgvector_round_trip_and_guards() -> None:
                 assert row is not None
                 assert row[0] == second[0].content_hash
                 assert row[1] == "[1,1,1]"
+
+            def source_chunks(body: str):
+                return prepare_documents(
+                    [{"id": "shrinking", "namespace": "alpha", "title": "Example", "text": body}],
+                    "alpha",
+                    10,
+                    0,
+                    "{body}",
+                )
+
+            original = source_chunks("alpha beta gamma delta")
+            replacement = source_chunks("updated")
+            assert len(original) == 3
+            with PgvectorStore(scoped_url) as store:
+                ingest_chunks(
+                    original, "alpha", embedder, store, 1, "offline-model",
+                    replace_source="shrinking",
+                )
+
+            with psycopg.connect(scoped_url, autocommit=True) as verify:
+                count = verify.execute(
+                    "SELECT count(*) FROM chunkkit_chunks WHERE namespace = %s AND source_id = %s",
+                    ("alpha", "shrinking"),
+                ).fetchone()
+                assert count == (3,)
+                verify.execute(
+                    "CREATE FUNCTION reject_chunk_delete() RETURNS trigger AS $$ "
+                    "BEGIN RAISE EXCEPTION 'forced delete failure'; END; $$ LANGUAGE plpgsql"
+                )
+                verify.execute(
+                    "CREATE TRIGGER reject_chunk_delete BEFORE DELETE ON chunkkit_chunks "
+                    "FOR EACH ROW EXECUTE FUNCTION reject_chunk_delete()"
+                )
+
+            with PgvectorStore(scoped_url) as store:
+                with pytest.raises(psycopg.Error, match="forced delete failure"):
+                    ingest_chunks(
+                        replacement, "alpha", embedder, store, 1, "offline-model",
+                        replace_source="shrinking",
+                    )
+
+            with psycopg.connect(scoped_url, autocommit=True) as verify:
+                rows = verify.execute(
+                    "SELECT chunk_index, content_hash FROM chunkkit_chunks "
+                    "WHERE namespace = %s AND source_id = %s ORDER BY chunk_index",
+                    ("alpha", "shrinking"),
+                ).fetchall()
+                assert rows == [(item.chunk_index, item.content_hash) for item in original]
+                verify.execute("DROP TRIGGER reject_chunk_delete ON chunkkit_chunks")
+                verify.execute("DROP FUNCTION reject_chunk_delete()")
+
+            with PgvectorStore(scoped_url) as store:
+                result = ingest_chunks(
+                    replacement, "alpha", embedder, store, 1, "offline-model",
+                    replace_source="shrinking",
+                )
+                repeated = ingest_chunks(
+                    replacement, "alpha", embedder, store, 1, "offline-model",
+                    replace_source="shrinking",
+                )
+            assert result.written == 1
+            assert repeated.skipped == 1
+            with psycopg.connect(scoped_url, autocommit=True) as verify:
+                rows = verify.execute(
+                    "SELECT chunk_index, content_hash FROM chunkkit_chunks "
+                    "WHERE namespace = %s AND source_id = %s",
+                    ("alpha", "shrinking"),
+                ).fetchall()
+                assert rows == [(0, replacement[0].content_hash)]
         finally:
             admin.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema_name))

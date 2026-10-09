@@ -1,67 +1,63 @@
 # Vector Chunk Kit
 
-Prepare human-reviewable text chunks, then embed and upsert them into a PostgreSQL database with pgvector. The input is your own JSONL file. The default command path is entirely local; external calls happen only when you explicitly run `ingest --apply`.
+Turn your own JSONL documents into reviewable, deterministic text chunks, then load them into PostgreSQL with pgvector. Preparation and preview run offline. An explicit `--apply` is required to call the embeddings API or write to a database.
 
-The project shows a small, inspectable pipeline: strict input validation, configurable chunk context, deterministic IDs, namespace checks, batched embedding requests, idempotent database writes, and safe failure behavior. The included data is fictional.
-
-## How it works
+For example, the included fictional garden guide starts as one document with a title, keywords, body, and metadata. `prepare` splits its body when needed and renders a chunk like this:
 
 ```text
-your JSONL documents
-        │
-        ▼
-prepare ──> reviewable JSONL chunks ──> ingest preview (offline)
-                                           │
-                                           ▼ explicit --apply
-                                  embeddings API + pgvector
+Topic: Community garden guide
+Keywords: seedlings, watering
+
+Plant seedlings in loose soil. Water gently in the morning. Check the soil before watering again. Keep paths clear for visitors.
 ```
 
-`prepare` splits text on word boundaries, optionally overlaps adjacent chunks, and renders each part through a template with `{title}`, `{keywords}`, and `{body}`. A content hash tracks changes; a stable chunk ID identifies the namespace, source, and position. On repeat ingestion of the same input, unchanged hashes skip the embedding call. Each database batch commits atomically, so an interrupted run can be repeated.
+The resulting JSONL also carries a stable ID, source ID, position, content hash, and metadata. You can inspect the result before sending any text to a provider.
 
-## Try it locally
+## Run the offline path
 
-Python 3.11+ and [uv](https://docs.astral.sh/uv/) are recommended.
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). From the repository root:
 
 ```bash
 uv sync --locked --all-extras
-uv run vector-chunk-kit prepare \
-  --input examples/synthetic-documents.jsonl \
-  --output output/chunks.jsonl \
-  --namespace demo \
-  --template-file examples/template.txt
+uv run vector-chunk-kit prepare --input examples/synthetic-documents.jsonl --output output/chunks.jsonl --namespace demo --template-file examples/template.txt
 uv run vector-chunk-kit ingest --input output/chunks.jsonl --namespace demo
 ```
 
-With the included fictional documents, `prepare` reports 2 chunks and the offline preview reports an estimate of 97 tokens. The estimate is based on character count, not model tokenization. Neither command needs an API key or database. Inspect `output/chunks.jsonl` before any write. `prepare` refuses to overwrite an existing output file; choose a new output path for another run. Output files, local environments, and credentials are ignored by Git.
+The example prepares two chunks and previews a rough estimate of 97 tokens. The estimate uses character count, not the embedding model's tokenizer or price. These commands need no API key or database. `prepare` refuses to overwrite an existing output file; remove that local file or select a different output path before repeating the example.
 
-### Input format
-
-Each non-empty line is one JSON object:
+Each input line is one JSON object:
 
 ```json
 {"id":"guide-1","namespace":"demo","title":"Example guide","text":"Your own source text goes here.","keywords":["example"],"metadata":{"category":"guide"}}
 ```
 
-`id`, `namespace`, `title`, and `text` are required. `keywords` and `metadata` are optional. The requested `--namespace` must match every input record; mixed input fails before an output file is written. IDs and namespaces use letters, digits, `.`, `_`, `:`, or `-`. The tool rejects duplicate source IDs, empty text, malformed metadata, and unsupported template fields.
+`id`, `namespace`, `title`, and `text` are required. `keywords` and `metadata` are optional. Records must all match `--namespace`; duplicate source IDs, empty text, invalid metadata, and malformed JSON fail before output is written. IDs and namespaces accept letters, digits, `.`, `_`, `:`, and `-`.
 
-### Customize chunks
+### Control chunk content
 
-Make a text template containing `{body}` and optionally `{title}` and `{keywords}`. Use `--template-file PATH`, `--max-chars N`, and `--overlap-chars N` to control the output. Template fields are data substitution only; they do not execute code. This first version uses deterministic templates. It does not call an LLM to invent keywords or rewrite source material.
+`--template-file` accepts a text template with `{body}` and optional `{title}` and `{keywords}` fields. `--max-chars` limits each **body part** before the template is rendered, while `--overlap-chars` repeats context between adjacent parts. The final rendered chunk can be longer than `--max-chars` because it also contains the title and keywords. Templates substitute data; they do not execute code. This project does not generate text or keywords with an LLM.
 
-## Write to your own pgvector database
+## Load into a disposable pgvector database
 
-Use a disposable PostgreSQL database with the pgvector extension. Review and apply [schema.sql](schema.sql) to a fresh database yourself; the CLI never creates or migrates tables. `CREATE TABLE IF NOT EXISTS` does not upgrade an older table. A namespace containing chunks without a model record is rejected; regenerate its embeddings in a new namespace or review a migration yourself. Stop older ingesters before migrating. Supply `OPENAI_API_KEY` and `DATABASE_URL` through your environment or a local secret manager. [.env.example](.env.example) contains placeholders only. The CLI does not load `.env` files automatically.
+Follow [the local PostgreSQL walkthrough](docs/LOCAL_POSTGRES.md) to start a disposable database and apply [schema.sql](schema.sql). The CLI never creates tables or runs migrations. Set `OPENAI_API_KEY` and `DATABASE_URL` in your environment or local secret manager; [.env.example](.env.example) is placeholders only, and the CLI does not load `.env` automatically. Review the prepared file before applying: it contains the source text, and `--apply` sends chunk text to the [OpenAI embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create).
 
 ```bash
-uv run vector-chunk-kit ingest \
-  --input output/chunks.jsonl \
-  --namespace demo \
-  --batch-size 16 \
-  --apply \
-  --confirm-namespace demo
+uv run vector-chunk-kit ingest --input output/chunks.jsonl --namespace demo --batch-size 16 --apply --confirm-namespace demo
 ```
 
-The selected namespace must be repeated exactly with `--confirm-namespace`. The optional `--model` defaults to `text-embedding-3-small`. The first applied run binds its namespace to one embedding model and vector dimension in the database. A later run with a different model fails before requesting embeddings; a different dimension fails before writing that batch. Use a new namespace and a separate retrieval configuration when changing models. The [OpenAI embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create) processes the chunk text, so send only data you are allowed to share with that provider. Costs depend on the model and input; the preview is **not** a price quote. The database adapter uses [pgvector's Psycopg integration](https://github.com/pgvector/pgvector-python#psycopg-3).
+The default is a read-only, offline preview. `--apply` requires the namespace to be repeated exactly in `--confirm-namespace`. The optional model defaults to `text-embedding-3-small`; a namespace is bound to one model and vector dimension on its first applied run. A model change fails before an embedding request, and a dimension mismatch fails before the affected write. Use a new namespace and matching retrieval configuration when changing models.
+
+Incremental ingestion updates chunks at matching source positions and skips stored content hashes that are unchanged. It **does not remove** old positions when a source becomes shorter. The included updated garden guide shows how to replace one source completely:
+
+```bash
+uv run vector-chunk-kit prepare --input examples/synthetic-updated-garden.jsonl --output output/one-source.jsonl --namespace demo --template-file examples/template.txt
+uv run vector-chunk-kit ingest --input output/one-source.jsonl --namespace demo
+uv run vector-chunk-kit ingest --input output/one-source.jsonl --namespace demo --replace-source garden-guide --apply --confirm-namespace demo
+```
+
+Replacement requires at least one chunk from exactly one source, with consecutive positions starting at zero. It computes pending embeddings first, then writes updated positions and removes surplus positions in one database transaction for that source. It does not delete a source entirely; that operation needs a separately reviewed database action. A provider failure leaves its stored chunks unchanged; a database failure rolls the source transaction back. API requests may still be billed even when a later database step fails. Repeating the same prepared input skips unchanged hashes. Different concurrent revisions of a source still require the caller to serialize writers.
+
+The content hash includes rendered text and metadata. Changing metadata alone currently requests a new embedding even if the rendered text is identical. This is deliberate for simple change tracking, but it can add provider cost.
 
 ## Verify
 
@@ -72,14 +68,13 @@ uv run mypy src
 uv build
 ```
 
-The tests cover deterministic output, custom context, malformed input, cross-namespace rejection, model and dimension guards, idempotent skips, batch failure, invalid vectors, and a preview that works without credentials. CI runs these checks on Linux and Windows, plus a separate integration job against a disposable PostgreSQL 16 service with pgvector. That job installs the extension and applies `schema.sql` inside a temporary schema, checks a real insert and update, and rejects model and dimension changes. The local suite skips this test unless `CHUNKKIT_TEST_DATABASE_URL` names the disposable `chunkkit_test` database for user `chunkkit` at `127.0.0.1:5432`. The test rejects connection-routing overrides and pins the network address to loopback. Never point the test at an operational database or forward its local port to one.
+CI runs unit checks on Linux and Windows with Python 3.11 and 3.14, plus PostgreSQL integration checks against a disposable pgvector service. The integration test runs locally only when `CHUNKKIT_TEST_DATABASE_URL` points to the expected loopback `chunkkit_test` database for user `chunkkit`; it rejects connection-routing overrides. See [the local PostgreSQL walkthrough](docs/LOCAL_POSTGRES.md) for the setup. The tests cover input validation, namespace and model guards, deterministic output, idempotence, failures, and source replacement.
 
-## Boundaries
+## Design and limits
 
-- The CLI scopes records and queries by namespace to prevent accidental mixing. It is **not** a full multi-tenant authorization service. Shared deployments need database roles, row-level security, and their own identity checks.
-- Replacing a source with fewer chunks updates the surviving positions but does not delete old positions. Review or remove stale positions in your own data lifecycle before using this for retrieval.
-- Concurrent ingestions of different revisions of one source use last-writer-wins updates. Serialize writers for a source if update order matters. Direct database writes can bypass the CLI's model and dimension checks.
-- One `--apply` run may make billable embedding requests. Partial database failure can require retrying a batch; already committed chunks are skipped on a later run.
-- This repository contains only synthetic examples. Do not commit prepared output containing private text or credentials.
+- The namespace is a data boundary in this CLI, **not** authentication or full tenant isolation. A shared service needs its own identity checks, database roles, row-level security, and operational controls.
+- The prepared output may contain private text. It is ignored by Git under `output/`; keep other output paths private too. Never commit credentials, customer documents, or real database exports.
+- An applied run can incur embeddings charges. The preview is an estimate, not a quote. Direct database writes bypass this CLI's model and dimension checks.
+- Concurrent writers of one source are last-writer-wins. The tool does not coordinate readers or provide a production migration strategy.
 
-See [architecture and security notes](docs/ARCHITECTURE.md) for the trust boundaries and failure model.
+Read [architecture and failure behavior](docs/ARCHITECTURE.md), [security reporting](SECURITY.md), and [contribution guidance](CONTRIBUTING.md) for the precise boundaries. All examples in this repository are fictional.

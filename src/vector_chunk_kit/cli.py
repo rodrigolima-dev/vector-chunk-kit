@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from .ingest import ingest_chunks
+from .ingest import ingest_chunks, validate_replacement
 from .prepare import DEFAULT_TEMPLATE, prepare_documents
 from .records import read_chunks, read_documents, write_chunks
 
@@ -27,6 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--model", default="text-embedding-3-small")
     ingest.add_argument("--apply", action="store_true")
     ingest.add_argument("--confirm-namespace")
+    ingest.add_argument("--replace-source")
     args = parser.parse_args(argv)
 
     try:
@@ -46,16 +47,22 @@ def main(argv: list[str] | None = None) -> int:
                 template,
             )
             write_chunks(args.output, chunks)
-            print(f"Prepared {len(chunks)} chunks in {args.output}")
+            label = "chunk" if len(chunks) == 1 else "chunks"
+            print(f"Prepared {len(chunks)} {label} in {args.output}")
             return 0
 
         chunks = read_chunks(args.input)
         if any(chunk.namespace != args.namespace for chunk in chunks):
             raise ValueError("prepared chunk namespace does not match requested namespace")
+        if args.replace_source is not None:
+            if not args.apply:
+                raise ValueError("--replace-source requires --apply")
+            validate_replacement(chunks, args.namespace, args.replace_source)
         if not args.apply:
             rough_tokens = sum((len(chunk.text) + 3) // 4 for chunk in chunks)
+            label = "chunk" if len(chunks) == 1 else "chunks"
             print(
-                f"Preview: {len(chunks)} chunks in namespace {args.namespace}; "
+                f"Preview: {len(chunks)} {label} in namespace {args.namespace}; "
                 f"rough character-based estimate: {rough_tokens} tokens. No external calls made."
             )
             return 0
@@ -73,7 +80,13 @@ def main(argv: list[str] | None = None) -> int:
             embedder = OpenAIEmbedder(api_key=api_key, model=args.model)
             with PgvectorStore(database_url) as store:
                 result = ingest_chunks(
-                    chunks, args.namespace, embedder, store, args.batch_size, model=args.model
+                    chunks,
+                    args.namespace,
+                    embedder,
+                    store,
+                    args.batch_size,
+                    model=args.model,
+                    replace_source=args.replace_source,
                 )
         except Exception:
             print(
