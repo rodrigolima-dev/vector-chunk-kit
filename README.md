@@ -55,7 +55,7 @@ uv run vector-chunk-kit ingest --input output/one-source.jsonl --namespace demo
 uv run vector-chunk-kit ingest --input output/one-source.jsonl --namespace demo --replace-source garden-guide --apply --confirm-namespace demo
 ```
 
-Replacement requires exactly one source and consecutive positions starting at zero. It computes pending embeddings first, then writes updated positions and removes surplus positions in one database transaction for that source. A provider failure therefore leaves its stored chunks unchanged; a database failure rolls the source transaction back. API requests may still be billed even when a later database step fails. Repeating the same prepared input skips unchanged hashes. Different concurrent revisions of a source still require the caller to serialize writers.
+Replacement requires at least one chunk from exactly one source, with consecutive positions starting at zero. It computes pending embeddings first, then writes updated positions and removes surplus positions in one database transaction for that source. It does not delete a source entirely; that operation needs a separately reviewed database action. A provider failure leaves its stored chunks unchanged; a database failure rolls the source transaction back. API requests may still be billed even when a later database step fails. Repeating the same prepared input skips unchanged hashes. Different concurrent revisions of a source still require the caller to serialize writers.
 
 The content hash includes rendered text and metadata. Changing metadata alone currently requests a new embedding even if the rendered text is identical. This is deliberate for simple change tracking, but it can add provider cost.
 

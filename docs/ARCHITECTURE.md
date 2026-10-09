@@ -28,7 +28,7 @@ JSONL documents -> validate -> prepare -> reviewable JSONL -> offline preview
 ## Write and failure model
 
 - Incremental mode embeds and commits in batches. A failed provider call writes nothing for that batch; a failed SQL statement rolls back that batch. Earlier batches remain and a retry skips rows with matching hashes.
-- `--replace-source` requires a file for one source with positions `0..n-1`. It gathers pending embeddings before changing chunks, then upserts and deletes surplus positions in one transaction for that source. Provider failure leaves stored chunks unchanged; SQL failure rolls the source transaction back.
+- `--replace-source` requires at least one chunk for one source with positions `0..n-1`. It gathers pending embeddings before changing chunks, then upserts and deletes surplus positions in one transaction for that source. Complete source deletion is outside this CLI. Provider failure leaves stored chunks unchanged; SQL failure rolls the source transaction back.
 - A failed first apply may leave an empty namespace model registration. Reuse the same model or choose a new namespace. An older database containing chunks without a model record fails closed; applying `schema.sql` with `IF NOT EXISTS` does not upgrade it.
 - Provider requests may be billed even if the following database transaction fails. Two concurrent writers of the same source can still overwrite each other; serialize writers when update order matters.
 
